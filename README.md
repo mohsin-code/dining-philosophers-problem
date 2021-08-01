@@ -1,2 +1,3 @@
 # Operating-Systems
-gcc diningPhilosopher.c monitor.c -o Solved -lpthread -lrt
+gcc DiningPhilosiphers.c Monitor.c -o Solved -lpthread -lrt
+./Solved
