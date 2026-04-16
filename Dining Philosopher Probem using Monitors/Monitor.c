@@ -1,107 +1,150 @@
+/**
+ * @file philosopher_monitor.c
+ * @brief Implementation of a Hoare-style Monitor for resource arbitration.
+ * * This module solves the Dining Philosophers problem using a monitor pattern
+ * implemented with POSIX semaphores. It ensures deadlock-freedom and
+ * mutual exclusion for shared resource access.
+ */
+
 #include <stdio.h>
-#include <unistd.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include "Monitor.h"
+#include <unistd.h>
 
-// Dining-Philosophers Solution Using Monitors
+#define NUM_PHILOSOPHERS 5
+#define RUN_TIME_SEC 10
 
-//Semaphores
-sem_t mutex, next;
+typedef enum { THINKING, HUNGRY, EATING } state_t;
 
-//Count of suspended process
-int next_count = 0;
+typedef struct {
+    sem_t sem;
+    int count; // Number of threads
+} condition_t;
 
-enum {THINKING, HUNGRY, EATING} state[5];
-typedef struct
-{
-	sem_t sem;
-	//count variable for philosophers waiting on condition semaphore sem
-	int count;
-} condition;
-condition x[N];
+typedef struct {
+    state_t state[NUM_PHILOSOPHERS];
+    condition_t cond_vars[NUM_PHILOSOPHERS];
+    sem_t mutex;
+    sem_t next;
+    int next_count;
+} PhilosopherMonitor;
 
-// Pickup chopsticks
-void pickup(int i)
-{
-	sem_wait(&mutex);
-	state[i] = HUNGRY;
-	// set state to eating in test()
-	// only if my left and right neighbors
-	// are not eating
-	test(i);
-	if (state[i] != EATING)
-		wait(i);
-		
-	if(next_count > 0)
-		sem_post(&next);
-	else
-		sem_post(&mutex);
+static void monitor_signal(PhilosopherMonitor *mon, int i) {
+    if (mon->cond_vars[i].count > 0) {
+        mon->next_count++;
+        sem_post(&mon->cond_vars[i].sem);
+        sem_wait(&mon->next);
+        mon->next_count--;
+    }
 }
 
-// Put down chopsticks
-void putdown(int i)
-{
-	sem_wait(&mutex);
-	state[i] = THINKING;
-	// if right neighbor R=(i+1)%5 is hungry and
-	// both of R’s neighbors are not eating,
-	// set R’s state to eating and wake it up by
-	// signaling R’s CV
-	test((i + 1) % 5);
-	test((i + 4) % 5);
-	
-	if(next_count > 0)
-		sem_post(&next);
-	else
-		sem_post(&mutex);
+static void monitor_wait(PhilosopherMonitor *mon, int i) {
+    mon->cond_vars[i].count++;
+    if (mon->next_count > 0)
+        sem_post(&mon->next);
+    else
+        sem_post(&mon->mutex);
+    
+    sem_wait(&mon->cond_vars[i].sem);
+    mon->cond_vars[i].count--;
 }
 
-void test(int i)
-{
-	if (	(state[(i + 1) % 5] != EATING) &&
-		(state[(i + 4) % 5] != EATING) &&
-		(state[i] == HUNGRY)	) {
-		// indicate that I’m eating
-		state[i] = EATING;
-		// signal() has no effect during Pickup(),
-		// but is important to wake up waiting
-		// hungry philosophers during Putdown()
-		signal(i);
-	}
+static void test_neighbors(PhilosopherMonitor *mon, int i) {
+    int left = (i + NUM_PHILOSOPHERS - 1) % NUM_PHILOSOPHERS;
+    int right = (i + 1) % NUM_PHILOSOPHERS;
+
+    if ((mon->state[left] != EATING) && 
+        (mon->state[right] != EATING) && 
+        (mon->state[i] == HUNGRY)) {
+        
+        mon->state[i] = EATING;
+        monitor_signal(mon, i);
+    }
 }
-	
-void wait(int i) {
-	x[i].count++;
-	if (next_count > 0)
-		sem_post(&next);  //signal
-	else
-		sem_post(&mutex); //signal
-	sem_wait(&x[i].sem);
-	x[i].count--;
+
+void monitor_init(PhilosopherMonitor *mon) {
+    sem_init(&mon->mutex, 0, 1);
+    sem_init(&mon->next, 0, 0);
+    mon->next_count = 0;
+
+    for (int i = 0; i < NUM_PHILOSOPHERS; i++) {
+        mon->state[i] = THINKING;
+        sem_init(&mon->cond_vars[i].sem, 0, 0);
+        mon->cond_vars[i].count = 0;
+    }
 }
-	
-void signal(int i) {
-	if (x[i].count > 0) {
-		next_count++;
-		sem_post(&x[i].sem);
-		sem_wait(&next);
-		next_count--;
-	}
+
+void pickup_chopsticks(PhilosopherMonitor *mon, int i) {
+    sem_wait(&mon->mutex);
+    
+    mon->state[i] = HUNGRY;
+    test_neighbors(mon, i);
+    
+    if (mon->state[i] != EATING) {
+        monitor_wait(mon, i);
+    }
+
+    if (mon->next_count > 0)
+        sem_post(&mon->next);
+    else
+        sem_post(&mon->mutex);
 }
-	
-void initialization() {
-	sem_init(&mutex,0,1);
-	sem_init(&next,0,0);
-	// Execution of Pickup(), Putdown() and test()
-	// are all mutually exclusive,
-	// i.e. only one at a time can be executing
-	for(int i = 0; i < 5; i++){
-		state[i] = THINKING;
-		sem_init(&x[i].sem,0,0);
-		x[i].count = 0;
-	// Verify that this monitor-based solution is
-	// deadlock free and mutually exclusive in that
-	// no 2 neighbors can eat simultaneously
-	}
+
+void putdown_chopsticks(PhilosopherMonitor *mon, int i) {
+    sem_wait(&mon->mutex);
+    
+    mon->state[i] = THINKING;
+    
+    // Check if neighbors can now eat
+    test_neighbors(mon, (i + NUM_PHILOSOPHERS - 1) % NUM_PHILOSOPHERS);
+    test_neighbors(mon, (i + 1) % NUM_PHILOSOPHERS);
+
+    if (mon->next_count > 0)
+        sem_post(&mon->next);
+    else
+        sem_post(&mon->mutex);
+}
+
+void* philosopher_routine(void* arg) {
+    int id = *(int*)arg;
+    PhilosopherMonitor* mon = (PhilosopherMonitor*)((void**)arg)[1];
+
+    for (int loops = 0; loops < 3; loops++) { // Limited loops for demo
+        printf("Philosopher %d is thinking...\n", id);
+        sleep(1);
+
+        printf("Philosopher %d is HUNGRY.\n", id);
+        pickup_chopsticks(mon, id);
+
+        printf("Philosopher %d is EATING.\n", id);
+        sleep(1);
+
+        printf("Philosopher %d is finished eating.\n", id);
+        putdown_chopsticks(mon, id);
+    }
+    return NULL;
+}
+
+int main() {
+    pthread_t threads[NUM_PHILOSOPHERS];
+    int ids[NUM_PHILOSOPHERS];
+    void* args[NUM_PHILOSOPHERS][2];
+    PhilosopherMonitor mon;
+
+    monitor_init(&mon);
+
+    for (int i = 0; i < NUM_PHILOSOPHERS; i++) {
+        ids[i] = i;
+        args[i][0] = &ids[i];
+        args[i][1] = &mon;
+        pthread_create(&threads[i], NULL, philosopher_routine, args[i]);
+    }
+
+    for (int i = 0; i < NUM_PHILOSOPHERS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    printf("Simulation complete.\n");
+    return 0;
 }
